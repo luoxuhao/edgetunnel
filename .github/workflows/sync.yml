@@ -1,44 +1,45 @@
-name: Upstream Sync
+name: Sync and deploy Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: Redeploy even when the source has not changed
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
-on:
-  schedule:
-    - cron: "0 0 * * *" # every day
-  workflow_dispatch:
+concurrency:
+  group: edgetunnel-production
+  cancel-in-progress: false
 
 jobs:
-  sync_latest_from_upstream:
-    name: Sync latest commits from upstream repo
+  update:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    if: ${{ github.event.repository.fork }}
-
+    timeout-minutes: 20
+    env:
+      CF_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FORCE_DEPLOY: ${{ inputs.force_deploy }}
     steps:
-      - name: Checkout target repo
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
           ref: main
-
-      - name: Sync upstream changes
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test update logic
+        run: node --test automation/update.test.mjs
+      - name: Validate configuration, synchronize and deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node automation/update.mjs
+      - name: Failure summary
+        if: failure()
         run: |
-          git config user.name "GH Action - Upstream Sync"
-          git config user.email "action@github.com"
-
-          git remote add upstream https://github.com/cmliu/edgetunnel.git
-          git fetch upstream main
-
-          if git diff --quiet HEAD upstream/main; then
-            # 内容和上游一致，直接对齐，顺带清理历史分叉留下的多余 merge commit
-            git reset --hard upstream/main
-            git push --force-with-lease origin main
-          else
-            # 有本地修改，保持原来的合并方式，不覆盖任何人的改动
-            if ! git pull --no-rebase upstream main; then
-              echo "[Error] 合并上游变更产生冲突，自动同步已暂停，请手动 Sync Fork 并解决冲突。"
-              echo "[Error] Merge conflict detected while syncing upstream. Please sync your fork manually and resolve the conflicts."
-              exit 1
-            fi
-            git push origin main
-          fi
+          echo 'Update failed. The scheduler retries on its next run. Check the failing step; no successful deployment state is recorded before Pages reports success.' >> "$GITHUB_STEP_SUMMARY"
