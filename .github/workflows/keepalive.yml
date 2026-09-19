@@ -2,6 +2,11 @@ name: Keep scheduled workflows active
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/keepalive.yml'
   schedule:
     - cron: '43 4 1,15 * *'
 
