@@ -54,7 +54,7 @@ GitHub Variables 已配置：
 - 创建/更新 `edgetunnel-update-scheduler` Worker
 - 配置 Cron
 
-因此 Token 需要同时具备 Pages 写入和 Workers 部署所需权限，并限制在你自己的 Cloudflare Account。
+因此 Token 需要同时具备 **Pages Write**，以及 Workers 产品范围的 **Admin**（首次创建 Scheduler Worker 需要；创建后日常部署只需 Editor）。限制在你自己的 Cloudflare Account。
 
 ### 2. GITHUB_SCHEDULER_PAT
 
