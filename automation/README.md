@@ -1,6 +1,83 @@
 # edgetunnel 无人值守更新（现有 Pages 项目）
 
-这套流程用于 `luoxuhao/edgetunnel` 的 `main` 分支。同步 `cmliu/edgetunnel` 的最新 main，不是 Release。代码合并只是准备完成，必须完成下面的一次性配置和首次运行验证才会自动更新。
+这套流程用于 `luoxuhao/edgetunnel` 的 `main` 分支。同步 `cmliu/edgetunnel` 的最新 main，不是 Release。目标是：上游更新后自动同步、自动部署到现有 Cloudflare Pages，并用独立 Cloudflare Cron 避开 GitHub 60 天定时任务休眠问题。
+
+## 最短部署路径
+
+### A. GitHub 变量 / Secrets
+
+进入：
+
+`Settings → Secrets and variables → Actions`
+
+添加：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Variable | `CF_PAGES_PROJECT` | 现有 Cloudflare Pages 项目名称 |
+| Variable | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Account ID |
+| Secret | `CLOUDFLARE_API_TOKEN` | Pages 部署用 Token，至少目标账号 Pages Edit |
+| Secret | `CLOUDFLARE_SCHEDULER_API_TOKEN` | 部署 Scheduler Worker 用 Token，至少 Workers Scripts Edit + Workers Cron Triggers Edit |
+| Secret | `GITHUB_SCHEDULER_PAT` | GitHub Fine-grained PAT，仅授权 `luoxuhao/edgetunnel`，Actions: Read and write |
+
+> `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_SCHEDULER_API_TOKEN` 可以使用同一个权限足够的 Cloudflare API Token，但分开保存更容易以后收紧权限。
+
+### B. Cloudflare Pages
+
+现有 Pages 项目保持原来的生产环境变量、Secrets、KV 绑定和兼容日期。
+
+确认：
+
+- Production branch = `main`
+- 关闭 **Enable automatic production branch deployments**
+- 自动 Preview deployment 设为 None
+
+这样避免 Cloudflare Git 集成和本仓库的 Wrangler 自动发布同时抢生产部署。
+
+### C. 一键部署防休眠 Scheduler Worker
+
+GitHub：
+
+`Actions → Deploy update scheduler → Run workflow`
+
+这个工作流会自动：
+
+1. 创建 / 更新 Worker：`edgetunnel-update-scheduler`
+2. 部署 `automation/scheduler/scheduler.mjs`
+3. 设置 Cron：`17 */6 * * *`
+4. 把 `GITHUB_SCHEDULER_PAT` 写入 Worker Secret `GITHUB_TOKEN`
+
+这个 Worker 每 6 小时调用 GitHub API。若 `sync.yml` 因 inactivity 变成 `disabled_inactivity`，它会先重新 Enable，再触发 workflow。
+
+### D. 首次验证主更新流程
+
+GitHub：
+
+`Actions → Sync and deploy Pages → Run workflow`
+
+确认任务成功后，再确认 Cloudflare Pages 出现新的 Production deployment，并测试你的实际订阅 / 连接。
+
+之后流程为：
+
+```
+Cloudflare Cron
+      ↓
+edgetunnel-update-scheduler
+      ↓
+GitHub workflow_dispatch
+      ↓
+sync.yml
+      ↓
+检查 cmliu/edgetunnel 最新 main
+      ↓
+同步 _worker.js / LICENSE / CHANGELOG
+      ↓
+有变化则 commit
+      ↓
+Wrangler 发布到现有 Pages
+      ↓
+确认 Production deployment 成功
+```
 
 ## 工作方式
 
@@ -10,50 +87,22 @@
 
 **自动更新会替换 `_worker.js` 中的个人修改。** 个性化配置请放在 Pages 环境变量和 KV 中。仓库中的 `wrangler.toml`、README 和工作流不会从上游覆盖。若上游以后增加其他必要文件、依赖或改变运行时要求，需要维护此白名单和兼容日期；这不是永远不需维护的保证。
 
-## 一次性配置
-
-1. 在 Cloudflare 打开现有 Pages 项目，确认生产分支为 `main`。保存好原有生产环境变量、Secrets、KV 绑定和兼容日期，不需要删除或新建 Pages 项目。
-2. 在 Pages 的 Build / Branch control 关闭 **Enable automatic production branch deployments**；将自动预览部署设为 None，避免新旧流程争抢发布。GitHub 连接可以保留。关闭自动构建不会停止当前线上部署。
-3. 在 GitHub 仓库 Settings → Secrets and variables → Actions 设置：
-
-| 类型 | 名称 | 内容 |
-| --- | --- | --- |
-| Variable | `CF_PAGES_PROJECT` | 现有 Pages 项目名称，不是域名 |
-| Variable | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare 账号 ID，32 位十六进制 |
-| Secret | `CLOUDFLARE_API_TOKEN` | 只授予目标账号 Cloudflare Pages Edit 权限的 API Token |
-
-4. 将本改动合并至 main，在 GitHub Actions 启用工作流，选择 **Sync and deploy Pages → Run workflow**。确认任务成功、Pages 生产部署更新，并实际测试你的订阅和连接。单纯部署成功不能验证代理协议、KV 数据或所有业务功能。
-5. 建立**独立** Worker，名称可用 `edgetunnel-update-scheduler`。将 `automation/scheduler/scheduler.mjs` 的代码部署给它，添加 Secret `GITHUB_TOKEN`。此处使用 GitHub fine-grained PAT：仅选择 `luoxuhao/edgetunnel`，授予 **Actions: Read and write**，Metadata 默认读取。不要授予全部仓库权限，也不要将 Token 写入代码。
-6. 给这个独立 Worker 添加 Cron Trigger：`17 */6 * * *`（UTC；每 6 小时）。可用 `automation/scheduler/wrangler.toml` 部署，也可在控制台添加。Worker 不提供 HTTP 触发入口。不要用它覆盖 edgetunnel 本身。
-7. 验证一次定时触发：Worker 日志出现 Update requested 后，GitHub 应出现新的工作流运行。必须再确认 GitHub 的运行结果；Worker 请求成功仅表示 GitHub 接受了请求。
-
-CLI 部署定时 Worker 的示例（需先安装 Node.js 并登录自己的 Cloudflare 账号）：
-
-```sh
-npx wrangler@4.135.0 login
-npx wrangler@4.135.0 deploy --config automation/scheduler/wrangler.toml
-npx wrangler@4.135.0 secret put GITHUB_TOKEN --config automation/scheduler/wrangler.toml
-```
-
-GitHub PAT 到期或撤销后需要更换；到期时间取决于你的账号/组织策略。Cloudflare Token 同理。请开启 GitHub Actions 失败通知，并查看定时 Worker 日志/按需配置 Cloudflare 告警。凭据、平台故障或上游破坏性更新仍可能需要人工处理。
-
 ## 暂停、恢复与回滚
 
-- 暂停：在 GitHub Actions 手动 Disable workflow，定时 Worker 会尊重 `disabled_manually`；也可删除 Worker 的 Cron Trigger。
-- 恢复：手动 Enable workflow，再 Run workflow。若只是旧工作流遗留的 `disabled_inactivity`，定时 Worker 会调用启用 API 后触发。
-- 重发：Run workflow 勾选 `force_deploy`。没有修改源码也会重新发布。
-- 业务故障回滚：先暂停工作流，再在 Pages 控制台回滚到以前的成功部署。未暂停时，下一次运行会重新发布上游版本。
-- 不自动回滚业务错误：脚本验证语法和 Cloudflare 部署状态，不会用未经验证的 HTTP 探针认定代理业务正常。
+- 暂停：在 GitHub Actions 手动 Disable `Sync and deploy Pages`；Scheduler Worker 会尊重 `disabled_manually`。
+- 恢复：手动 Enable workflow，再 Run workflow。
+- 若只是 GitHub inactivity 导致 `disabled_inactivity`，Scheduler Worker 会自动重新启用。
+- 重发：Run workflow 时勾选 `force_deploy`。
+- 业务故障回滚：先暂停 workflow，再在 Pages 控制台回滚到以前的成功部署。
 
-## 验证
+## 本地验证
 
 ```sh
 node --test automation/update.test.mjs
 ```
 
-覆盖网络重试、认证失败、部署指纹变化、定时触发和尊重手动暂停。线上发布、账号权限和环境变量需在配置后进行首次实际验证。
-
 官方参考：
-- https://developers.cloudflare.com/pages/configuration/git-integration/ （现有 Git 项目关闭自动部署后可使用 Wrangler 发布）
+
+- https://developers.cloudflare.com/pages/configuration/git-integration/
 - https://developers.cloudflare.com/workers/configuration/cron-triggers/
 - https://docs.github.com/en/rest/actions/workflows
