@@ -1,0 +1,64 @@
+name: Deploy update scheduler
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgetunnel-scheduler-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_SCHEDULER_API_TOKEN }}
+      GITHUB_SCHEDULER_PAT: ${{ secrets.GITHUB_SCHEDULER_PAT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[a-fA-F0-9]{32}$ ]]; then
+            echo "CLOUDFLARE_ACCOUNT_ID is missing or invalid."
+            exit 1
+          fi
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+            echo "CLOUDFLARE_SCHEDULER_API_TOKEN is missing."
+            exit 1
+          fi
+          if [[ -z "${GITHUB_SCHEDULER_PAT:-}" ]]; then
+            echo "GITHUB_SCHEDULER_PAT is missing."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Deploy scheduler Worker and Cron trigger
+        run: npx --yes wrangler@4.135.0 deploy --config automation/scheduler/wrangler.toml
+
+      - name: Configure GitHub token in scheduler Worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_SCHEDULER_PAT" |
+            npx --yes wrangler@4.135.0 secret put GITHUB_TOKEN --config automation/scheduler/wrangler.toml
+
+      - name: Summary
+        run: |
+          echo "## Scheduler deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Worker: edgetunnel-update-scheduler" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cron: 17 */6 * * * (UTC)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target workflow: .github/workflows/sync.yml" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Next: run 'Sync and deploy Pages' once to validate the full chain." >> "$GITHUB_STEP_SUMMARY"
