@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 10
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_SCHEDULER_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GITHUB_SCHEDULER_PAT: ${{ secrets.GITHUB_SCHEDULER_PAT }}
 
     steps:
@@ -27,18 +27,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[a-fA-F0-9]{32}$ ]]; then
-            echo "CLOUDFLARE_ACCOUNT_ID is missing or invalid."
-            exit 1
-          fi
-          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-            echo "CLOUDFLARE_SCHEDULER_API_TOKEN is missing."
-            exit 1
-          fi
-          if [[ -z "${GITHUB_SCHEDULER_PAT:-}" ]]; then
-            echo "GITHUB_SCHEDULER_PAT is missing."
-            exit 1
-          fi
+          [[ "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[a-fA-F0-9]{32}$ ]] || { echo "CLOUDFLARE_ACCOUNT_ID is missing or invalid."; exit 1; }
+          [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] || { echo "CLOUDFLARE_API_TOKEN is missing."; exit 1; }
+          [[ -n "${GITHUB_SCHEDULER_PAT:-}" ]] || { echo "GITHUB_SCHEDULER_PAT is missing."; exit 1; }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
