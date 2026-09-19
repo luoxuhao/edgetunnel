@@ -2,6 +2,11 @@ name: Sync upstream
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/sync.yml'
   schedule:
     - cron: '17 */6 * * *'
 
@@ -16,6 +21,8 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout main
