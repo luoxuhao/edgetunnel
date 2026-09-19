@@ -2,6 +2,11 @@ name: Deploy update scheduler
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'automation/scheduler/**'
 
 permissions:
   contents: read
@@ -52,4 +57,4 @@ jobs:
           echo "- Worker: edgetunnel-update-scheduler" >> "$GITHUB_STEP_SUMMARY"
           echo "- Cron: 17 */6 * * * (UTC)" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target workflow: .github/workflows/sync.yml" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Next: run 'Sync and deploy Pages' once to validate the full chain." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Scheduler changes will redeploy automatically on future pushes." >> "$GITHUB_STEP_SUMMARY"
