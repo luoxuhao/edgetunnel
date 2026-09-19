@@ -1,45 +1,85 @@
-name: Sync and deploy Pages
+name: Sync upstream
 
 on:
   workflow_dispatch:
-    inputs:
-      force_deploy:
-        description: Redeploy even when the source has not changed
-        type: boolean
-        default: false
+  schedule:
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: write
 
 concurrency:
-  group: edgetunnel-production
+  group: edgetunnel-upstream-sync
   cancel-in-progress: false
 
 jobs:
-  update:
-    if: github.ref == 'refs/heads/main'
+  sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      CF_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      FORCE_DEPLOY: ${{ inputs.force_deploy }}
+    timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout main
+        uses: actions/checkout@v6
         with:
           ref: main
-          fetch-depth: 1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Test update logic
-        run: node --test automation/update.test.mjs
-      - name: Validate configuration, synchronize and deploy
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node automation/update.mjs
-      - name: Failure summary
-        if: failure()
+          fetch-depth: 0
+
+      - name: Fetch latest upstream files
+        id: upstream
+        shell: bash
         run: |
-          echo 'Update failed. The scheduler retries on its next run. Check the failing step; no successful deployment state is recorded before Pages reports success.' >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+
+          API="https://api.github.com/repos/cmliu/edgetunnel/commits/main"
+          UPSTREAM_SHA="$(curl --fail --silent --show-error --retry 3             -H 'Accept: application/vnd.github+json'             "$API" | jq -r '.sha')"
+
+          if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid upstream commit SHA: $UPSTREAM_SHA"
+            exit 1
+          fi
+
+          echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $UPSTREAM_SHA"
+
+          for file in _worker.js LICENSE CHANGELOG; do
+            url="https://raw.githubusercontent.com/cmliu/edgetunnel/$UPSTREAM_SHA/$file"
+            curl --fail --location --silent --show-error --retry 3               "$url" -o "$file.new"
+
+            if [[ ! -s "$file.new" ]]; then
+              echo "::error::Downloaded file is empty: $file"
+              exit 1
+            fi
+
+            mv "$file.new" "$file"
+          done
+
+          node --check _worker.js
+
+      - name: Commit upstream changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add -- _worker.js LICENSE CHANGELOG
+
+          if git diff --cached --quiet; then
+            echo "No upstream changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          SHORT_SHA="${{ steps.upstream.outputs.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:12}"
+
+          git commit -m "Update edgetunnel from $SHORT_SHA"
+          git push origin HEAD:main
+
+      - name: Summary
+        run: |
+          echo "## Upstream sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Source: cmliu/edgetunnel main" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit: ${{ steps.upstream.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Files watched: _worker.js, LICENSE, CHANGELOG" >> "$GITHUB_STEP_SUMMARY"
+          echo "- If files changed, the push to main lets Cloudflare Pages Git integration deploy automatically." >> "$GITHUB_STEP_SUMMARY"
