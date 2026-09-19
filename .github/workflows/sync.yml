@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - '.github/workflows/sync.yml'
+      - '.github/scripts/build-pages.sh'
   schedule:
     - cron: '17 */6 * * *'
 
@@ -21,8 +22,6 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout main
@@ -31,45 +30,46 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Fetch latest upstream files
-        id: upstream
+      - name: Mirror upstream project
+        id: sync
         shell: bash
         run: |
           set -euo pipefail
 
-          API="https://api.github.com/repos/cmliu/edgetunnel/commits/main"
-          UPSTREAM_SHA="$(curl --fail --silent --show-error --retry 3             -H 'Accept: application/vnd.github+json'             "$API" | jq -r '.sha')"
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/cmliu/edgetunnel.git
+          git fetch --depth=1 upstream main
 
+          UPSTREAM_SHA="$(git rev-parse upstream/main)"
           if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Invalid upstream commit SHA: $UPSTREAM_SHA"
             exit 1
           fi
 
+          TMP_DIR="$(mktemp -d)"
+          git archive upstream/main | tar -x -C "$TMP_DIR"
+
+          if [[ ! -s "$TMP_DIR/_worker.js" ]]; then
+            echo "::error::Upstream _worker.js is missing or empty"
+            exit 1
+          fi
+
+          node --check "$TMP_DIR/_worker.js"
+
+          # Mirror the upstream project while preserving this fork's .github/
+          # directory, which contains the updater and Pages build helper.
+          rsync -a --delete             --exclude='.git/'             --exclude='.github/'             "$TMP_DIR/" ./
+
+          # Verify that the mirrored source can produce the Pages payload.
+          bash .github/scripts/build-pages.sh
+          rm -rf dist
+
+          git add -A
+
           echo "sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
-          echo "Upstream commit: $UPSTREAM_SHA"
-
-          for file in _worker.js LICENSE CHANGELOG; do
-            url="https://raw.githubusercontent.com/cmliu/edgetunnel/$UPSTREAM_SHA/$file"
-            curl --fail --location --silent --show-error --retry 3               "$url" -o "$file.new"
-
-            if [[ ! -s "$file.new" ]]; then
-              echo "::error::Downloaded file is empty: $file"
-              exit 1
-            fi
-
-            mv "$file.new" "$file"
-          done
-
-          node --check _worker.js
-
-      - name: Commit upstream changes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          git add -- _worker.js LICENSE CHANGELOG
 
           if git diff --cached --quiet; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
             echo "No upstream changes."
             exit 0
           fi
@@ -77,16 +77,49 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          SHORT_SHA="${{ steps.upstream.outputs.sha }}"
-          SHORT_SHA="${SHORT_SHA:0:12}"
-
+          SHORT_SHA="${UPSTREAM_SHA:0:12}"
           git commit -m "Update edgetunnel from $SHORT_SHA"
           git push origin HEAD:main
 
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "Upstream changes committed."
+
+      - name: Keep scheduled workflow active when repository is idle
+        if: steps.sync.outputs.updated == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NOW="$(date +%s)"
+          LAST_COMMIT="$(git log -1 --format=%ct)"
+          AGE_DAYS="$(( (NOW - LAST_COMMIT) / 86400 ))"
+
+          if (( AGE_DAYS < 28 )); then
+            echo "Repository activity is only ${AGE_DAYS} days old; no keepalive needed."
+            exit 0
+          fi
+
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .github/keepalive
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive
+
+          if git diff --cached --quiet; then
+            echo "Keepalive file is already current."
+            exit 0
+          fi
+
+          git commit -m "[CF-Pages-Skip] Keep scheduled workflow active"
+          git push origin HEAD:main
+          echo "Keepalive commit created after ${AGE_DAYS} days without repository activity."
+
       - name: Summary
+        if: always()
         run: |
           echo "## Upstream sync" >> "$GITHUB_STEP_SUMMARY"
           echo "- Source: cmliu/edgetunnel main" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Commit: ${{ steps.upstream.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Files watched: _worker.js, LICENSE, CHANGELOG" >> "$GITHUB_STEP_SUMMARY"
-          echo "- If files changed, the push to main lets Cloudflare Pages Git integration deploy automatically." >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream commit: ${{ steps.sync.outputs.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Upstream files changed: ${{ steps.sync.outputs.updated }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Mirror policy: preserve .github/, mirror the rest of upstream" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Pages build validation: .github/scripts/build-pages.sh" >> "$GITHUB_STEP_SUMMARY"
